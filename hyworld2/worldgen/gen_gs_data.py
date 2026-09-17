@@ -136,8 +136,8 @@ if __name__ == '__main__':
 
         if args.high_res or need_regen:
             full_img = Image.open(pano_image_path)
-            if args.high_res and full_img.size[1] > 1920:
-                full_img = full_img.resize((3840, 1920), resample=Image.Resampling.BICUBIC)
+            if args.high_res and full_img.size[1] > 2048:
+                full_img = full_img.resize((4096, 2048), resample=Image.Resampling.BICUBIC)
             depth_pt_path = f"{scene_path}/render_results/full_depth_prediction.pt"
             sky_mask_path = f"{scene_path}/render_results/sky_mask.png"
             if os.path.exists(depth_pt_path) and os.path.exists(sky_mask_path):

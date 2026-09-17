@@ -73,7 +73,18 @@ LLM_PORT = 8000
 
 SAM_BATCH_SIZE = 4
 MAX_MASK_COUNT = 5
-HF_CACHE_DIR = os.path.expanduser("~/.cache/huggingface/hub")
+def _hf_token():
+    return os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+
+
+def _hf_hub_cache_dir():
+    hf_home = os.environ.get("HF_HOME")
+    if hf_home:
+        return os.path.join(hf_home, "hub")
+    return os.path.expanduser("~/.cache/huggingface/hub")
+
+
+HF_CACHE_DIR = _hf_hub_cache_dir()
 ZIM_REPO_ID = "naver-iv/zim-anything-vitl"
 ZIM_SUBFOLDER = "zim_vit_l_2092"
 GD_REPO_ID = "IDEA-Research/grounding-dino-tiny"
@@ -89,6 +100,7 @@ def resolve_hf_checkpoint(repo_id, allow_patterns=None, subfolder=None, required
         repo_id=repo_id,
         allow_patterns=allow_patterns,
         cache_dir=HF_CACHE_DIR,
+        token=_hf_token(),
     )
     checkpoint_dir = os.path.join(repo_root, subfolder) if subfolder else repo_root
     required_files = required_files or []
@@ -204,8 +216,13 @@ if __name__ == '__main__':
 
     # VLM & SAM3
     client = OpenAI(api_key="EMPTY", base_url=f"http://{LLM_ADDR}:{LLM_PORT}/v1")
-    sam3_model = Sam3Model.from_pretrained("facebook/sam3").to(device)
-    sam3_processor = Sam3Processor.from_pretrained("facebook/sam3")
+    sam3_source = os.environ.get("SAM3_MODEL_PATH") or SAM3_REPO_ID
+    sam3_local = os.path.isdir(sam3_source)
+    sam3_kw = {"token": _hf_token(), "cache_dir": _hf_hub_cache_dir()}
+    if sam3_local:
+        sam3_kw["local_files_only"] = True
+    sam3_model = Sam3Model.from_pretrained(sam3_source, **sam3_kw).to(device)
+    sam3_processor = Sam3Processor.from_pretrained(sam3_source, **sam3_kw)
     print("Models Initializing over.")
 
     # Near-view rotations used by regular trajectory generation.
@@ -245,8 +262,8 @@ if __name__ == '__main__':
         image_path = f"{scene_path}/panorama_sr.png" if os.path.exists(f"{scene_path}/panorama_sr.png") else f"{scene_path}/panorama.png"
 
         full_img = Image.open(image_path)
-        if full_img.size[1] > 1920:
-            full_img = full_img.resize((3840, 1920), resample=Image.Resampling.BICUBIC)
+        if full_img.size[1] > 2048:
+            full_img = full_img.resize((4096, 2048), resample=Image.Resampling.BICUBIC)
         width_origin, height_origin = full_img.size
 
         # get meta info
