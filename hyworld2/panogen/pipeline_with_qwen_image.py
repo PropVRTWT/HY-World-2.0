@@ -252,10 +252,10 @@ def parse_args():
     parser.add_argument("--negative-prompt", type=str, default="",
                         help="Additional negative prompt appended to the default")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--height", type=int, default=2048,
+    parser.add_argument("--height", type=int, default=960,
                         help="Height of the generated panorama image.")
-    parser.add_argument("--width", type=int, default=4128,
-                        help="Width of the generated panorama image (pre-blend; 4128-32=4096).")
+    parser.add_argument("--width", type=int, default=1952,
+                        help="Width of the generated panorama image (pre-blend; 1952-32=1920).")
     parser.add_argument("--num-inference-steps", type=int, default=40,
                         help="Number of diffusion denoising steps.")
     parser.add_argument("--guidance-scale", type=float, default=1.0,
