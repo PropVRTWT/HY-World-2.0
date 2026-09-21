@@ -49,12 +49,18 @@ GENERAL_POSITIVE_SUFFIX = " 8k UHD, masterpiece, razor-sharp details."
 GENERAL_POSITIVE_PREFIX = (
     "Create a **ERP** panoramic expansion of the provided image. "
     "Preserve the original style, lighting, and fine details seamlessly "
-    "throughout the extended areas, extend according to: "
+    "throughout the extended areas. Maintain exact window grid alignment, "
+    "consistent floor-to-floor height and spacing, straight vertical lines, "
+    "and correct perspective convergence with the original structure across "
+    "the full expansion. Keep all text and signage sharp, legible, and "
+    "spelled exactly as shown in the source. Extend according to: "
 )
 GENERAL_NEGATIVE_PROMPT = (
     "低分辨率，低画质，模糊。杂乱的背景，结构扭曲，模糊纹理，物体融合。构图混乱。"
     "过度光滑，画面具有AI感。人脸畸形。巨大物体，巨大建筑，近景特写，近景压迫，比例失调。"
     "车，车辆。画面上方的树叶。"
+    "建筑扭曲变形，窗户错位不对齐，重影，立面双重曝光，建筑融化，楼层间距不一致，"
+    "结构元素重复，家具重复排列，图案平铺重复，文字模糊不清，招牌文字错误。"
 )
 
 
