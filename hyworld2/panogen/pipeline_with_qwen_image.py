@@ -42,6 +42,7 @@ from PIL import Image
 import torch
 
 from qwen_image import PanoDiffusionPipeline
+import enhance
 
 PANO_INSTRUCTION = "Expand this image to a 360-degree equirectangular panorama."
 
@@ -181,8 +182,15 @@ class HunyuanPanoPipeline:
         true_cfg_scale: float = 7.5,
         blend_width: int = 32,
         crop_border: float = 0.0,
+        # ---- enhancement (post-generation; see enhance.py) ----
+        validate_seam: bool = True,
+        seam_threshold: float = 25.0,
+        max_seed_retries: int = 1,
+        correct_zenith_nadir: bool = False,
+        refine_color: bool = False,
     ) -> Image.Image:
-        """Run panorama generation and return the blended output image.
+        """Run panorama generation and return the blended, optionally-enhanced
+        output image.
 
         Args:
             image: Path to the input image (str or Path).
@@ -197,9 +205,26 @@ class HunyuanPanoPipeline:
             blend_width: Pixel-space edge blending width for final post-process.
             crop_border: Fraction of image border to crop before inference
                 (removes compression artefacts on edges).
+            validate_seam: Measure the wrap seam after blending; if it's above
+                seam_threshold, try a wider re-blend first, then (if that's
+                not enough and max_seed_retries > 0) regenerate with the next
+                seed and keep whichever attempt has the lowest seam diff.
+                Cheap and safe -- no extra model calls unless a seed retry is
+                actually needed.
+            seam_threshold: Average L1 column-diff above which the seam is
+                considered bad (see enhance.measure_seam_diff).
+            max_seed_retries: How many extra seeds to try if re-blending alone
+                doesn't bring the seam under threshold. 0 disables retrying.
+            correct_zenith_nadir: EXPERIMENTAL (default off). Regenerate the
+                zenith/nadir caps for geometric straightness. See enhance.py's
+                module docstring -- this is a full regeneration of that region,
+                not a gentle correction, and can invent new detail.
+            refine_color: EXPERIMENTAL (default off). Whole-panorama color/
+                exposure refinement pass. Same caveat as correct_zenith_nadir.
 
         Returns:
-            PIL.Image: The generated panorama image (after edge blending).
+            PIL.Image: The generated panorama image, blended and (if enabled)
+            enhanced.
         """
         image = str(image)
         if not Path(image).exists():
@@ -219,25 +244,79 @@ class HunyuanPanoPipeline:
             h_crop = int(crop_border * h)
             pil_image = pil_image.crop((w_crop, h_crop, w - w_crop, h - h_crop))
 
-        print("Start generating panorama image...")
-        print(f"  Input image:      {image}")
-        print(f"  Infer steps:      {num_inference_steps}")
-        print(f"  Seed:             {seed}")
+        def _generate(gen_seed: int) -> Image.Image:
+            print("Start generating panorama image...")
+            print(f"  Input image:      {image}")
+            print(f"  Infer steps:      {num_inference_steps}")
+            print(f"  Seed:             {gen_seed}")
+            raw = self.pipe(
+                image=pil_image,
+                prompt=full_positive,
+                negative_prompt=full_negative,
+                generator=torch.Generator(device="cpu").manual_seed(gen_seed),
+                true_cfg_scale=true_cfg_scale,
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                num_images_per_prompt=1,
+                height=height,
+                width=width,
+            ).images[0]
+            return circular_blend_edges(raw, blend_width)
 
-        output = self.pipe(
-            image=pil_image,
-            prompt=full_positive,
-            negative_prompt=full_negative,
-            generator=torch.Generator(device="cpu").manual_seed(seed),
-            true_cfg_scale=true_cfg_scale,
-            num_inference_steps=num_inference_steps,
-            guidance_scale=guidance_scale,
-            num_images_per_prompt=1,
-            height=height,
-            width=width,
-        ).images[0]
+        result = _generate(seed)
 
-        return circular_blend_edges(output, blend_width)
+        # ---- Stage 2: seam validation, cheap re-blend, seed retry ----
+        if validate_seam:
+            result, metrics = enhance.validate_and_fix_seam(
+                result, seam_threshold=seam_threshold,
+            )
+            print(f"  Seam avg diff:    {metrics['seam_avg_before']:.1f}"
+                  f" (threshold {seam_threshold})")
+            if metrics["reblended"]:
+                print(f"  Re-blended ->     {metrics['seam_avg_after']:.1f}")
+
+            best_result, best_avg = result, metrics.get(
+                "seam_avg_after", metrics["seam_avg_before"]
+            )
+            retries_left = max_seed_retries
+            next_seed = seed
+            while best_avg > seam_threshold and retries_left > 0:
+                next_seed += 1
+                retries_left -= 1
+                print(f"  Seam still bad, retrying with seed={next_seed} "
+                      f"({retries_left} retries left)...")
+                candidate = _generate(next_seed)
+                candidate, cand_metrics = enhance.validate_and_fix_seam(
+                    candidate, seam_threshold=seam_threshold,
+                )
+                cand_avg = cand_metrics.get(
+                    "seam_avg_after", cand_metrics["seam_avg_before"]
+                )
+                print(f"  Retry seam avg diff: {cand_avg:.1f}")
+                if cand_avg < best_avg:
+                    best_result, best_avg = candidate, cand_avg
+            result = best_result
+
+        # ---- Stage 3: EXPERIMENTAL pole correction (off by default) ----
+        if correct_zenith_nadir:
+            print("  Running EXPERIMENTAL zenith/nadir correction "
+                  "(full regeneration of the cap regions -- inspect output)...")
+            try:
+                result = enhance.correct_poles(
+                    self.pipe, result, negative_prompt=full_negative, seed=seed,
+                )
+            except ImportError as exc:
+                print(f"  Skipped pole correction: {exc}")
+
+        # ---- Stage 4: EXPERIMENTAL color/exposure refinement (off by default) ----
+        if refine_color:
+            print("  Running EXPERIMENTAL color/exposure refinement "
+                  "(full regeneration -- inspect output)...")
+            result = enhance.refine_colors(
+                self.pipe, result, negative_prompt=full_negative, seed=seed,
+            )
+
+        return result
 
     def __call__(self, image, **kwargs) -> Image.Image:
         return self.forward(image, **kwargs)
@@ -272,6 +351,21 @@ def parse_args():
                         help="Pixel-space edge blending width for final post-process.")
     parser.add_argument("--crop-border", type=float, default=0.0,
                         help="Fraction of image border to crop before inference.")
+
+    # ---- enhancement (see enhance.py) ----
+    parser.add_argument("--no-validate-seam", action="store_false", dest="validate_seam",
+                        help="Skip seam measurement/re-blend/retry (on by default).")
+    parser.add_argument("--seam-threshold", type=float, default=25.0,
+                        help="Avg L1 column-diff above which the seam is considered bad.")
+    parser.add_argument("--max-seed-retries", type=int, default=1,
+                        help="Extra seeds to try if re-blending doesn't fix a bad seam.")
+    parser.add_argument("--correct-zenith-nadir", action="store_true",
+                        help="EXPERIMENTAL: regenerate zenith/nadir caps for straight "
+                             "lines. Off by default -- see enhance.py's module docstring "
+                             "for the hallucination-risk caveat.")
+    parser.add_argument("--refine-color", action="store_true",
+                        help="EXPERIMENTAL: whole-panorama color/exposure refinement "
+                             "pass. Off by default -- same caveat as --correct-zenith-nadir.")
 
     # ---- model init ----
     parser.add_argument("--pretrained-model-name-or-path", type=str,
@@ -320,6 +414,11 @@ def main(args):
         true_cfg_scale=args.true_cfg_scale,
         blend_width=args.blend_width,
         crop_border=args.crop_border,
+        validate_seam=args.validate_seam,
+        seam_threshold=args.seam_threshold,
+        max_seed_retries=args.max_seed_retries,
+        correct_zenith_nadir=args.correct_zenith_nadir,
+        refine_color=args.refine_color,
     )
 
     # Save

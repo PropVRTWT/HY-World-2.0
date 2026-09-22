@@ -10,6 +10,11 @@ transformers[accelerate,tiktoken]==4.57.1
 huggingface_hub[cli]
 loguru>=0.7.3
 
+# enhance.py: equirectangular<->perspective reprojection for the experimental
+# --correct-zenith-nadir pole-correction pass. Not needed unless that flag is
+# used (import is lazy in enhance.py).
+py360convert
+
 # PyTorch with CUDA 11.8 support (install separately)
 # torch==2.7.1
 # torchvision==0.22.1
