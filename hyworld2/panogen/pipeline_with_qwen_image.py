@@ -47,22 +47,96 @@ import enhance
 PANO_INSTRUCTION = "Expand this image to a 360-degree equirectangular panorama."
 
 GENERAL_POSITIVE_SUFFIX = " 8k UHD, masterpiece, razor-sharp details."
-GENERAL_POSITIVE_PREFIX = (
-    "Create a **ERP** panoramic expansion of the provided image. "
+
+# The positive prompt is composed from three blocks so that build_positive_prompt()
+# can drop or reorder them depending on how much weight the caller's own prompt
+# should get. ERP_CORE_INSTRUCTION is the only one that must always survive --
+# without it the model stops producing a panorama at all.
+ERP_CORE_INSTRUCTION = (
+    "Create a seamless **ERP** 360-degree equirectangular panoramic expansion "
+    "of the provided image. "
+)
+IMMERSIVE_FRAMING = (
+    "The camera stands inside the space at natural standing eye level, as if the "
+    "viewer is physically present in the room. Keep the original subject at its "
+    "true scale and distance with natural near-field depth and close surroundings "
+    "— do not retreat the viewpoint or shrink the scene into the distance. "
+)
+STRUCTURAL_FIDELITY = (
     "Preserve the original style, lighting, and fine details seamlessly "
     "throughout the extended areas. Maintain exact window grid alignment, "
     "consistent floor-to-floor height and spacing, straight vertical lines, "
-    "and correct perspective convergence with the original structure across "
-    "the full expansion. Keep all text and signage sharp, legible, and "
-    "spelled exactly as shown in the source. Extend according to: "
+    "and correct perspective convergence with the original structure. Keep all "
+    "text and signage sharp, legible, and spelled exactly as shown in the source. "
 )
+
+GENERAL_POSITIVE_PREFIX = (
+    ERP_CORE_INSTRUCTION + IMMERSIVE_FRAMING + STRUCTURAL_FIDELITY
+    + "Extend according to: "
+)
+
+# NOTE: upstream's stock negative prompt also carried
+#   巨大物体，巨大建筑，近景特写，近景压迫   (oversized objects / oversized
+#   buildings / extreme close-up / cramped close-range framing)
+# Those four were removed deliberately. Enforced at true_cfg_scale=7.5 they are
+# the hardest-weighted signal in the pipeline, and they penalise exactly the
+# framing an interior walkthrough needs -- near walls, close furniture, a
+# viewpoint inside the room. They were pushing the camera back out of the scene.
+# 比例失调 (disproportionate scale) is kept: that targets proportion errors, not
+# viewer distance.
 GENERAL_NEGATIVE_PROMPT = (
     "低分辨率，低画质，模糊。杂乱的背景，结构扭曲，模糊纹理，物体融合。构图混乱。"
-    "过度光滑，画面具有AI感。人脸畸形。巨大物体，巨大建筑，近景特写，近景压迫，比例失调。"
+    "过度光滑，画面具有AI感。人脸畸形。比例失调。"
     "车，车辆。画面上方的树叶。"
     "建筑扭曲变形，窗户错位不对齐，重影，立面双重曝光，建筑融化，楼层间距不一致，"
     "结构元素重复，家具重复排列，图案平铺重复，文字模糊不清，招牌文字错误。"
+    "视点后退，场景过远，画面空旷，主体渺小。"
 )
+
+PROMPT_PRIORITY_CHOICES = ("normal", "high", "exclusive")
+
+
+def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
+    """Compose the final positive prompt from the caller's text and the template.
+
+    `priority` controls how much of the text conditioning the caller's own
+    prompt gets, relative to the fixed template:
+
+      "normal"    — template first, caller's text spliced in before the suffix
+                    (the original behaviour).
+      "high"      — caller's text LEADS, and is repeated after the template so
+                    it bookends the fixed instructions.
+      "exclusive" — caller's text leads and only ERP_CORE_INSTRUCTION +
+                    IMMERSIVE_FRAMING survive; the structural-fidelity block is
+                    dropped so the caller's wording dominates.
+
+    This is text-side weighting only. The mechanical lever is `guidance_scale`
+    (default 1.0 = no classifier-free-guidance amplification of the positive
+    prompt, while the negative prompt runs at true_cfg_scale=7.5) -- raise it
+    alongside priority="high"/"exclusive" if the prompt still is not landing.
+    Repeating the caller's text in "high" mode is a standard diffusion emphasis
+    heuristic, not a guarantee.
+    """
+    if priority not in PROMPT_PRIORITY_CHOICES:
+        raise ValueError(
+            f"prompt_priority must be one of {PROMPT_PRIORITY_CHOICES}, got {priority!r}"
+        )
+
+    user = (prompt or "").strip()
+
+    if priority == "normal":
+        return (GENERAL_POSITIVE_PREFIX + user + GENERAL_POSITIVE_SUFFIX).strip()
+
+    if priority == "exclusive":
+        parts = ([user] if user else []) + [ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING]
+    else:  # "high"
+        parts = ([user] if user else []) + [
+            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, STRUCTURAL_FIDELITY,
+        ]
+        if user:
+            parts.append(user)  # bookend the fixed block
+
+    return (" ".join(p.strip() for p in parts if p.strip()) + GENERAL_POSITIVE_SUFFIX).strip()
 
 
 # ============================================================
@@ -173,6 +247,7 @@ class HunyuanPanoPipeline:
         image,
         *,
         prompt: str = "",
+        prompt_priority: str = "normal",
         negative_prompt: str = "",
         seed: int = 42,
         height: int = 960,
@@ -194,7 +269,13 @@ class HunyuanPanoPipeline:
 
         Args:
             image: Path to the input image (str or Path).
-            prompt: User-provided description appended to the positive template.
+            prompt: User-provided description composed into the positive template.
+            prompt_priority: How much weight the caller's own prompt gets versus
+                the fixed template -- "normal" (spliced into the template),
+                "high" (leads and is repeated around it), or "exclusive"
+                (leads, structural-fidelity block dropped). See
+                build_positive_prompt(). Note this is text-side weighting only;
+                guidance_scale is the mechanical lever on prompt adherence.
             negative_prompt: Additional negative prompt appended to the default.
             seed: Random seed for reproducibility.
             height: Output image height in pixels.
@@ -231,9 +312,7 @@ class HunyuanPanoPipeline:
             raise ValueError(f"Input image does not exist: {image}")
 
         # Build final prompts
-        full_positive = (
-            GENERAL_POSITIVE_PREFIX + prompt + GENERAL_POSITIVE_SUFFIX
-        ).strip()
+        full_positive = build_positive_prompt(prompt, prompt_priority)
         full_negative = (GENERAL_NEGATIVE_PROMPT + " " + negative_prompt).strip()
 
         # Crop border to remove compression artefacts
@@ -333,7 +412,16 @@ def parse_args():
     # ---- per-inference ----
     parser.add_argument("--image", type=str, required=True, help="Path to the input image")
     parser.add_argument("--prompt", type=str, default="",
-                        help="User prompt appended to the positive template")
+                        help="User prompt composed into the positive template")
+    parser.add_argument("--prompt-priority", type=str, default="normal",
+                        choices=list(PROMPT_PRIORITY_CHOICES),
+                        help="How much weight your --prompt gets vs the fixed "
+                             "template: 'normal' splices it in, 'high' leads with "
+                             "it and repeats it around the template, 'exclusive' "
+                             "leads with it and drops the structural-fidelity "
+                             "block. Text weighting only -- raise --guidance-scale "
+                             "(default 1.0, i.e. no amplification) if the prompt "
+                             "still is not landing hard enough.")
     parser.add_argument("--negative-prompt", type=str, default="",
                         help="Additional negative prompt appended to the default")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -405,6 +493,7 @@ def main(args):
     output = pipeline(
         args.image,
         prompt=args.prompt,
+        prompt_priority=args.prompt_priority,
         negative_prompt=args.negative_prompt,
         seed=args.seed,
         height=args.height,
