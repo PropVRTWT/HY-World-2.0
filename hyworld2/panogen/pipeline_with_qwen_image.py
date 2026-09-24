@@ -75,22 +75,40 @@ GENERAL_POSITIVE_PREFIX = (
     + "Extend according to: "
 )
 
-# NOTE: upstream's stock negative prompt also carried
-#   巨大物体，巨大建筑，近景特写，近景压迫   (oversized objects / oversized
-#   buildings / extreme close-up / cramped close-range framing)
-# Those four were removed deliberately. Enforced at true_cfg_scale=7.5 they are
-# the hardest-weighted signal in the pipeline, and they penalise exactly the
-# framing an interior walkthrough needs -- near walls, close furniture, a
-# viewpoint inside the room. They were pushing the camera back out of the scene.
-# 比例失调 (disproportionate scale) is kept: that targets proportion errors, not
-# viewer distance.
+# Rewritten from upstream's stock Chinese prompt. Three deliberate changes, all
+# targeting observed failures in PropVR interior output:
+#
+# 1. LANGUAGE. Now English. The stock prompt was 100% Chinese and is enforced at
+#    true_cfg_scale=7.5 -- the heaviest text signal in the pipeline -- while the
+#    positive prompt is English. Output kept acquiring invented Chinese wall
+#    signage. Removing the Chinese-language conditioning is the cheapest test of
+#    whether that was the cause. NOTE: this does NOT suppress Chinese present in
+#    the INPUT -- that survives via the VAE image conditioning, which is far
+#    stronger than text. Only invented signage is targeted, below.
+#
+# 2. DROPPED the anti-detail terms:
+#      杂乱的背景 (cluttered background), 构图混乱 (chaotic composition)
+#    At 7.5x these penalise busy, detailed content -- so the model filled the
+#    ~240 degrees it has to invent with flat empty walls, which is exactly the
+#    "illusion region is all walls" complaint. Blank-wall suppression added
+#    instead.
+#
+# 3. DROPPED 招牌文字错误 (incorrect signage text). Asking for text to be
+#    *rendered correctly* implicitly licenses text existing at all.
+#
+# Previously dropped (kept out): 巨大物体, 巨大建筑, 近景特写, 近景压迫 --
+# oversized/close-up penalties that pushed the camera back out of the scene.
 GENERAL_NEGATIVE_PROMPT = (
-    "低分辨率，低画质，模糊。杂乱的背景，结构扭曲，模糊纹理，物体融合。构图混乱。"
-    "过度光滑，画面具有AI感。人脸畸形。比例失调。"
-    "车，车辆。画面上方的树叶。"
-    "建筑扭曲变形，窗户错位不对齐，重影，立面双重曝光，建筑融化，楼层间距不一致，"
-    "结构元素重复，家具重复排列，图案平铺重复，文字模糊不清，招牌文字错误。"
-    "视点后退，场景过远，画面空旷，主体渺小。"
+    "low resolution, low quality, blurry, blurry texture, distorted structure, "
+    "objects merging together, overly smooth, artificial AI look, deformed faces, "
+    "disproportionate scale, cars, vehicles, tree leaves at the top of the frame, "
+    "warped architecture, misaligned windows, ghosting, double-exposed facade, "
+    "melted building, inconsistent floor spacing, duplicated structural elements, "
+    "repeated furniture arrangement, repeating tiled pattern, "
+    "blank featureless wall, bare untextured surface, empty monotonous plane, "
+    "undetailed filler geometry, unfurnished empty space, "
+    "fabricated signage, invented wall text, spurious lettering, "
+    "viewpoint retreating, scene too distant, subject too small, empty barren framing."
 )
 
 PROMPT_PRIORITY_CHOICES = ("normal", "high", "exclusive")
