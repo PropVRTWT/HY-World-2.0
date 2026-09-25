@@ -48,7 +48,7 @@ PANO_INSTRUCTION = "Expand this image to a 360-degree equirectangular panorama."
 
 GENERAL_POSITIVE_SUFFIX = " 8k UHD, masterpiece, razor-sharp details."
 
-# The positive prompt is composed from three blocks so that build_positive_prompt()
+# The positive prompt is composed from four blocks so that build_positive_prompt()
 # can drop or reorder them depending on how much weight the caller's own prompt
 # should get. ERP_CORE_INSTRUCTION is the only one that must always survive --
 # without it the model stops producing a panorama at all.
@@ -62,6 +62,21 @@ IMMERSIVE_FRAMING = (
     "true scale and distance with natural near-field depth and close surroundings "
     "— do not retreat the viewpoint or shrink the scene into the distance. "
 )
+# Added after suppressing invented signage left walls bare. The model had been
+# using invented text panels AS wall decoration; removing that without naming a
+# replacement meant it fell back to flat plaster. A negative prompt can only say
+# "don't" -- this is the "do". Deliberately anchored to the SOURCE IMAGE's own
+# style rather than naming any region or design school, so it stays neutral and
+# takes its cues from whatever was actually uploaded.
+SURFACE_DETAIL = (
+    "Furnish every wall and surface with interior detail drawn from the source "
+    "image's own style, materials and palette: framed artwork and pictures, "
+    "shelving holding books, ceramics and objects, wall sconces and light "
+    "fixtures, panelling, mouldings, niches and skirting, console tables, "
+    "cabinets, seating and plants set against the walls, and door or window "
+    "openings where the layout allows. Leave no surface as bare undecorated "
+    "plaster. "
+)
 STRUCTURAL_FIDELITY = (
     "Preserve the original style, lighting, and fine details seamlessly "
     "throughout the extended areas. Maintain exact window grid alignment, "
@@ -71,7 +86,7 @@ STRUCTURAL_FIDELITY = (
 )
 
 GENERAL_POSITIVE_PREFIX = (
-    ERP_CORE_INSTRUCTION + IMMERSIVE_FRAMING + STRUCTURAL_FIDELITY
+    ERP_CORE_INSTRUCTION + IMMERSIVE_FRAMING + SURFACE_DETAIL + STRUCTURAL_FIDELITY
     + "Extend according to: "
 )
 
@@ -106,8 +121,8 @@ GENERAL_NEGATIVE_PROMPT = (
     "melted building, inconsistent floor spacing, duplicated structural elements, "
     "repeated furniture arrangement, repeating tiled pattern, "
     "blank featureless wall, bare untextured surface, empty monotonous plane, "
-    "undetailed filler geometry, unfurnished empty space, "
-    "fabricated signage, invented wall text, spurious lettering, "
+    "undetailed filler geometry, unfurnished empty space, bare empty room, "
+    "fabricated shop signage, invented wall lettering, meaningless text characters, "
     "viewpoint retreating, scene too distant, subject too small, empty barren framing."
 )
 
@@ -125,15 +140,23 @@ def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
       "high"      — caller's text LEADS, and is repeated after the template so
                     it bookends the fixed instructions.
       "exclusive" — caller's text leads and only ERP_CORE_INSTRUCTION +
-                    IMMERSIVE_FRAMING survive; the structural-fidelity block is
-                    dropped so the caller's wording dominates.
+                    IMMERSIVE_FRAMING + SURFACE_DETAIL survive; the
+                    structural-fidelity block is dropped so the caller's
+                    wording dominates.
 
-    This is text-side weighting only. The mechanical lever is `guidance_scale`
-    (default 1.0 = no classifier-free-guidance amplification of the positive
-    prompt, while the negative prompt runs at true_cfg_scale=7.5) -- raise it
-    alongside priority="high"/"exclusive" if the prompt still is not landing.
-    Repeating the caller's text in "high" mode is a standard diffusion emphasis
-    heuristic, not a guarantee.
+    SURFACE_DETAIL is kept in every mode, alongside IMMERSIVE_FRAMING: both are
+    corrective blocks for observed failures (bare walls, retreating camera)
+    rather than verbose boilerplate, and dropping either reintroduces the bug
+    they exist to prevent. STRUCTURAL_FIDELITY is the only block "exclusive"
+    sheds.
+
+    This is text-side weighting only. The mechanical lever is `true_cfg_scale`
+    (default 7.5) -- raise it alongside priority="high"/"exclusive" if the
+    prompt still is not landing. NOT `guidance_scale`, which feeds the
+    guidance-distillation embedding rather than classifier-free guidance and is
+    either ignored or harmful when moved off its trained value. Repeating the
+    caller's text in "high" mode is a standard diffusion emphasis heuristic,
+    not a guarantee.
     """
     if priority not in PROMPT_PRIORITY_CHOICES:
         raise ValueError(
@@ -146,10 +169,13 @@ def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
         return (GENERAL_POSITIVE_PREFIX + user + GENERAL_POSITIVE_SUFFIX).strip()
 
     if priority == "exclusive":
-        parts = ([user] if user else []) + [ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING]
+        parts = ([user] if user else []) + [
+            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, SURFACE_DETAIL,
+        ]
     else:  # "high"
         parts = ([user] if user else []) + [
-            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, STRUCTURAL_FIDELITY,
+            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, SURFACE_DETAIL,
+            STRUCTURAL_FIDELITY,
         ]
         if user:
             parts.append(user)  # bookend the fixed block
@@ -275,6 +301,10 @@ class HunyuanPanoPipeline:
         true_cfg_scale: float = 7.5,
         blend_width: int = 32,
         crop_border: float = 0.0,
+        # ---- input-side ERP conditioning (camera scale; see enhance.py) ----
+        input_fov: float | None = None,
+        input_walls: int | None = None,
+        erp_fill: str = "blur",
         # ---- enhancement (post-generation; see enhance.py) ----
         validate_seam: bool = True,
         seam_threshold: float = 25.0,
@@ -340,6 +370,23 @@ class HunyuanPanoPipeline:
             w_crop = int(crop_border * w)
             h_crop = int(crop_border * h)
             pil_image = pil_image.crop((w_crop, h_crop, w - w_crop, h - h_crop))
+
+        # ---- ERP conditioning: fix the input's angular width by geometry ----
+        # Without this the model guesses what slice of the 360 the photo spans,
+        # and a wide interior shot guessed narrow reads as "camera backed away".
+        fov = input_fov
+        if fov is None and input_walls is not None:
+            fov = enhance.fov_for_walls(input_walls)
+        if fov is not None:
+            try:
+                erp_w = width - blend_width  # canvas matches the final ERP width
+                pil_image, coverage = enhance.project_input_to_erp(
+                    pil_image, fov_deg=fov, out_hw=(height, erp_w), fill=erp_fill,
+                )
+                print(f"  ERP conditioning: fov={fov:.0f}deg -> input covers "
+                      f"{coverage*100:.0f}% of the sweep (fill={erp_fill})")
+            except ImportError as exc:
+                print(f"  Skipped ERP conditioning: {exc}")
 
         def _generate(gen_seed: int) -> Image.Image:
             print("Start generating panorama image...")
@@ -458,6 +505,25 @@ def parse_args():
     parser.add_argument("--crop-border", type=float, default=0.0,
                         help="Fraction of image border to crop before inference.")
 
+    # ---- ERP conditioning (camera scale / position) ----
+    parser.add_argument("--input-fov", type=float, default=None,
+                        help="Horizontal field of view of the input photo, in degrees. "
+                             "Projects it into the ERP canvas at its true angular width "
+                             "so the model is told -- not left to guess -- what slice of "
+                             "the 360 it occupies. Fixes the 'camera backed away' effect. "
+                             "EXPERIMENTAL: the model has no mask channel, so whether it "
+                             "cooperates with a partly-filled canvas is unverified.")
+    parser.add_argument("--input-walls", type=int, default=None, choices=[1, 2, 3],
+                        help="Convenience alternative to --input-fov: how many wall "
+                             "planes the photo shows (1=~65deg, 2=~105deg, 3=~130deg). "
+                             "Ignored if --input-fov is given.")
+    parser.add_argument("--erp-fill", type=str, default="blur",
+                        choices=["blur", "gray", "black"],
+                        help="How to fill the part of the ERP canvas the photo does not "
+                             "cover. 'blur' extends edge colours outward and blurs them "
+                             "so the gap reads as soft continuation rather than a hard "
+                             "black band.")
+
     # ---- enhancement (see enhance.py) ----
     parser.add_argument("--no-validate-seam", action="store_false", dest="validate_seam",
                         help="Skip seam measurement/re-blend/retry (on by default).")
@@ -521,6 +587,9 @@ def main(args):
         true_cfg_scale=args.true_cfg_scale,
         blend_width=args.blend_width,
         crop_border=args.crop_border,
+        input_fov=args.input_fov,
+        input_walls=args.input_walls,
+        erp_fill=args.erp_fill,
         validate_seam=args.validate_seam,
         seam_threshold=args.seam_threshold,
         max_seed_retries=args.max_seed_retries,
