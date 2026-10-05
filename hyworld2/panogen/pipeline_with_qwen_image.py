@@ -363,6 +363,18 @@ class HunyuanPanoPipeline:
         full_positive = build_positive_prompt(prompt, prompt_priority)
         full_negative = (GENERAL_NEGATIVE_PROMPT + " " + negative_prompt).strip()
 
+        print("[HY-Pano] inference params:")
+        print(f"  prompt_priority:  {prompt_priority}")
+        print(f"  true_cfg_scale:   {true_cfg_scale}")
+        print(f"  guidance_scale:   {guidance_scale}")
+        print(f"  height x width:   {height} x {width}")
+        print(f"  blend_width:      {blend_width}")
+        print(f"  num_infer_steps:  {num_inference_steps}")
+        print(f"  user prompt:      {prompt!r}")
+        print(f"  user negative:    {negative_prompt!r}")
+        print(f"  full_positive:    {full_positive}")
+        print(f"  full_negative:    {full_negative}")
+
         # Crop border to remove compression artefacts
         pil_image = Image.open(image).convert("RGB")
         if crop_border > 0:
@@ -499,7 +511,9 @@ def parse_args():
     parser.add_argument("--guidance-scale", type=float, default=1.0,
                         help="Classifier-free guidance scale.")
     parser.add_argument("--true-cfg-scale", type=float, default=7.5,
-                        help=argparse.SUPPRESS)
+                        help="True CFG scale for negative-prompt guidance (default 7.5). "
+                             "Raise slightly (e.g. 8–9) to push harder against --negative-prompt; "
+                             "too high may oversaturate colours.")
     parser.add_argument("--blend-width", type=int, default=32,
                         help="Pixel-space edge blending width for final post-process.")
     parser.add_argument("--crop-border", type=float, default=0.0,
