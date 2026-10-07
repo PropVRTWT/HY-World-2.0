@@ -56,11 +56,15 @@ ERP_CORE_INSTRUCTION = (
     "Create a seamless **ERP** 360-degree equirectangular panoramic expansion "
     "of the provided image. "
 )
+# Positive wording only. This block used to end "-- do not retreat the viewpoint
+# or shrink the scene into the distance", which names the failure inside the
+# POSITIVE prompt; text conditioning tends to pick up named concepts regardless
+# of the "do not". The negative prompt already carries "viewpoint retreating,
+# scene too distant".
 IMMERSIVE_FRAMING = (
     "The camera stands inside the space at natural standing eye level, as if the "
     "viewer is physically present in the room. Keep the original subject at its "
-    "true scale and distance with natural near-field depth and close surroundings "
-    "— do not retreat the viewpoint or shrink the scene into the distance. "
+    "true scale and distance with natural near-field depth and close surroundings. "
 )
 # Added after suppressing invented signage left walls bare. The model had been
 # using invented text panels AS wall decoration; removing that without naming a
@@ -129,7 +133,7 @@ GENERAL_NEGATIVE_PROMPT = (
 PROMPT_PRIORITY_CHOICES = ("normal", "high", "exclusive")
 
 
-def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
+def build_positive_prompt(prompt: str, priority: str = "normal", surface_detail: bool = True) -> str:
     """Compose the final positive prompt from the caller's text and the template.
 
     `priority` controls how much of the text conditioning the caller's own
@@ -144,11 +148,15 @@ def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
                     structural-fidelity block is dropped so the caller's
                     wording dominates.
 
-    SURFACE_DETAIL is kept in every mode, alongside IMMERSIVE_FRAMING: both are
-    corrective blocks for observed failures (bare walls, retreating camera)
-    rather than verbose boilerplate, and dropping either reintroduces the bug
-    they exist to prevent. STRUCTURAL_FIDELITY is the only block "exclusive"
-    sheds.
+    SURFACE_DETAIL is kept in every mode by default, alongside IMMERSIVE_FRAMING:
+    both are corrective blocks for observed failures (bare walls, retreating
+    camera). STRUCTURAL_FIDELITY is the only block "exclusive" sheds.
+
+    surface_detail=False drops SURFACE_DETAIL in any mode. Its furnishing list
+    (framed art, shelving, cabinets, seating against the walls) is applied to
+    every invented region, so on a scene that is meant to stay sparse -- or a
+    close-in camera, where it fills the floor between camera and subject with
+    extra rug and chairs -- it works against the caller's own prompt.
 
     This is text-side weighting only. The mechanical lever is `true_cfg_scale`
     (default 7.5) -- raise it alongside priority="high"/"exclusive" if the
@@ -164,17 +172,23 @@ def build_positive_prompt(prompt: str, priority: str = "normal") -> str:
         )
 
     user = (prompt or "").strip()
+    detail = [SURFACE_DETAIL] if surface_detail else []
 
     if priority == "normal":
-        return (GENERAL_POSITIVE_PREFIX + user + GENERAL_POSITIVE_SUFFIX).strip()
+        # Same block order as GENERAL_POSITIVE_PREFIX; identical to it when
+        # surface_detail is True.
+        prefix = "".join(
+            [ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, *detail, STRUCTURAL_FIDELITY]
+        ) + "Extend according to: "
+        return (prefix + user + GENERAL_POSITIVE_SUFFIX).strip()
 
     if priority == "exclusive":
         parts = ([user] if user else []) + [
-            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, SURFACE_DETAIL,
+            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, *detail,
         ]
     else:  # "high"
         parts = ([user] if user else []) + [
-            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, SURFACE_DETAIL,
+            ERP_CORE_INSTRUCTION, IMMERSIVE_FRAMING, *detail,
             STRUCTURAL_FIDELITY,
         ]
         if user:
@@ -292,6 +306,7 @@ class HunyuanPanoPipeline:
         *,
         prompt: str = "",
         prompt_priority: str = "normal",
+        surface_detail: bool = True,
         negative_prompt: str = "",
         seed: int = 42,
         height: int = 960,
@@ -324,6 +339,8 @@ class HunyuanPanoPipeline:
                 (leads, structural-fidelity block dropped). See
                 build_positive_prompt(). Note this is text-side weighting only;
                 guidance_scale is the mechanical lever on prompt adherence.
+            surface_detail: Include the SURFACE_DETAIL furnishing block in the
+                positive prompt (default True). See build_positive_prompt().
             negative_prompt: Additional negative prompt appended to the default.
             seed: Random seed for reproducibility.
             height: Output image height in pixels.
@@ -334,12 +351,14 @@ class HunyuanPanoPipeline:
             blend_width: Pixel-space edge blending width for final post-process.
             crop_border: Fraction of image border to crop before inference
                 (removes compression artefacts on edges).
-            validate_seam: Measure the wrap seam after blending; if it's above
-                seam_threshold, try a wider re-blend first, then (if that's
-                not enough and max_seed_retries > 0) regenerate with the next
-                seed and keep whichever attempt has the lowest seam diff.
-                Cheap and safe -- no extra model calls unless a seed retry is
-                actually needed.
+            validate_seam: Measure the wrap seam after blending. A hard cut
+                (edge-column diff above seam_threshold) gets a wider re-blend
+                first; a hard cut that survives it, or smear near the join
+                (enhance.measure_seam_smear), triggers a regenerate with the
+                next seed (if max_seed_retries > 0), keeping the best attempt.
+                No extra model calls unless a seed retry is actually needed --
+                but smeared outputs now do trigger one, where previously the
+                check passed them.
             seam_threshold: Average L1 column-diff above which the seam is
                 considered bad (see enhance.measure_seam_diff).
             max_seed_retries: How many extra seeds to try if re-blending alone
@@ -360,11 +379,12 @@ class HunyuanPanoPipeline:
             raise ValueError(f"Input image does not exist: {image}")
 
         # Build final prompts
-        full_positive = build_positive_prompt(prompt, prompt_priority)
+        full_positive = build_positive_prompt(prompt, prompt_priority, surface_detail)
         full_negative = (GENERAL_NEGATIVE_PROMPT + " " + negative_prompt).strip()
 
         print("[HY-Pano] inference params:")
         print(f"  prompt_priority:  {prompt_priority}")
+        print(f"  surface_detail:   {surface_detail}")
         print(f"  true_cfg_scale:   {true_cfg_scale}")
         print(f"  guidance_scale:   {guidance_scale}")
         print(f"  height x width:   {height} x {width}")
@@ -428,15 +448,21 @@ class HunyuanPanoPipeline:
             )
             print(f"  Seam avg diff:    {metrics['seam_avg_before']:.1f}"
                   f" (threshold {seam_threshold})")
+            print(f"  Seam smear:       {metrics['seam_smear_columns']} columns"
+                  f" (threshold {enhance.SEAM_SMEAR_THRESHOLD})")
             if metrics["reblended"]:
                 print(f"  Re-blended ->     {metrics['seam_avg_after']:.1f}")
 
-            best_result, best_avg = result, metrics.get(
-                "seam_avg_after", metrics["seam_avg_before"]
-            )
+            def _seam_rank(m: dict) -> tuple:
+                # Lower is better: a passing seam beats a failing one, then
+                # less smear, then a smaller edge-column difference.
+                return (m["seam_bad"], m["seam_smear_columns"],
+                        m.get("seam_avg_after", m["seam_avg_before"]))
+
+            best_result, best_metrics = result, metrics
             retries_left = max_seed_retries
             next_seed = seed
-            while best_avg > seam_threshold and retries_left > 0:
+            while best_metrics["seam_bad"] and retries_left > 0:
                 next_seed += 1
                 retries_left -= 1
                 print(f"  Seam still bad, retrying with seed={next_seed} "
@@ -448,9 +474,10 @@ class HunyuanPanoPipeline:
                 cand_avg = cand_metrics.get(
                     "seam_avg_after", cand_metrics["seam_avg_before"]
                 )
-                print(f"  Retry seam avg diff: {cand_avg:.1f}")
-                if cand_avg < best_avg:
-                    best_result, best_avg = candidate, cand_avg
+                print(f"  Retry seam avg diff: {cand_avg:.1f}, "
+                      f"smear: {cand_metrics['seam_smear_columns']} columns")
+                if _seam_rank(cand_metrics) < _seam_rank(best_metrics):
+                    best_result, best_metrics = candidate, cand_metrics
             result = best_result
 
         # ---- Stage 3: EXPERIMENTAL pole correction (off by default) ----
@@ -499,6 +526,10 @@ def parse_args():
                              "block. Text weighting only -- raise --guidance-scale "
                              "(default 1.0, i.e. no amplification) if the prompt "
                              "still is not landing hard enough.")
+    parser.add_argument("--no-surface-detail", action="store_false", dest="surface_detail",
+                        help="Drop the built-in SURFACE_DETAIL furnishing block (framed art, "
+                             "shelving, cabinets, seating against the walls) from the positive "
+                             "prompt. Use for sparse scenes or a close-in camera.")
     parser.add_argument("--negative-prompt", type=str, default="",
                         help="Additional negative prompt appended to the default")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -592,6 +623,7 @@ def main(args):
         args.image,
         prompt=args.prompt,
         prompt_priority=args.prompt_priority,
+        surface_detail=args.surface_detail,
         negative_prompt=args.negative_prompt,
         seed=args.seed,
         height=args.height,
