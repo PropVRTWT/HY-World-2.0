@@ -54,6 +54,38 @@ def measure_seam_diff(image: Image.Image, sample_step: int = 2) -> tuple[float, 
     return float(diffs.mean()), float(diffs.max())
 
 
+# Measured on PropVR outputs (2026-10): clean seams 2-5 smeared columns,
+# visibly smeared ones 19-24. Seven images -- re-check as more runs come in.
+SEAM_SMEAR_THRESHOLD = 10
+
+
+def measure_seam_smear(
+    image: Image.Image,
+    *,
+    edge_px: int = 40,
+    band: tuple[float, float] = (0.25, 0.70),
+    ratio: float = 0.35,
+) -> int:
+    """Count horizontally smeared columns within `edge_px` of the 0/360 join.
+
+    The model sometimes stretches pixels sideways at the canvas edges. Those
+    columns barely change from left to right, so the two outermost columns end
+    up *more* alike than normal content -- measure_seam_diff() scores such a
+    panorama as its best seam (6.8-7.5 measured, vs 14-16 for clean ones).
+    This counts columns near either edge whose left-right change is below
+    `ratio` x the image's typical change, inside the horizon `band` (sky and
+    floor are naturally flat and would read as smear).
+    """
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+    h = arr.shape[0]
+    rows = arr[int(h * band[0]):int(h * band[1])]
+    change = np.abs(np.diff(rows, axis=1)).mean(axis=(0, 2))
+    margin = max(1, change.shape[0] // 10)
+    typical = float(np.median(change[margin:-margin]))
+    flat = change < ratio * typical
+    return int(flat[:edge_px].sum() + flat[-edge_px:].sum())
+
+
 def reblend_final_edges(image: Image.Image, blend_width: int = 48) -> Image.Image:
     """Pull the leftmost and rightmost columns of an already-cropped panorama
     toward each other (via their shared per-row average), tapering back to
@@ -82,19 +114,29 @@ def validate_and_fix_seam(
     image: Image.Image,
     *,
     seam_threshold: float = 25.0,
+    smear_threshold: int = SEAM_SMEAR_THRESHOLD,
     reblend_width: int = 48,
 ) -> tuple[Image.Image, dict]:
-    """Measure the seam and, if it's bad, apply a wider cross-fade as a cheap
-    fix. Returns (possibly-reblended image, metrics dict).
+    """Measure the seam and, if it's a hard cut, apply a wider cross-fade as a
+    cheap fix. Returns (possibly-reblended image, metrics dict).
+
+    Two failure modes, checked separately:
+      * hard cut -- outermost columns differ (measure_seam_diff). A wider
+        cross-fade can fix it, so it is re-blended here.
+      * smear -- stretched pixels near the join (measure_seam_smear). A
+        cross-fade only spreads the smear wider, so it is NOT re-blended; it
+        is reported via metrics["seam_bad"] for the caller to retry a seed.
 
     Does NOT retry generation with a new seed -- that needs to re-run the
     diffusion call and belongs in the caller (HunyuanPanoPipeline.forward),
     which has access to do so.
     """
     avg_before, max_before = measure_seam_diff(image)
+    smear = measure_seam_smear(image)
     metrics: dict = {
         "seam_avg_before": avg_before,
         "seam_max_before": max_before,
+        "seam_smear_columns": smear,
         "reblended": False,
     }
     if avg_before > seam_threshold:
@@ -105,6 +147,10 @@ def validate_and_fix_seam(
             seam_avg_after=avg_after,
             seam_max_after=max_after,
         )
+    metrics["seam_bad"] = (
+        metrics.get("seam_avg_after", avg_before) > seam_threshold
+        or smear > smear_threshold
+    )
     return image, metrics
 
 
