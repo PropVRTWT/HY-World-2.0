@@ -26,6 +26,7 @@ from __future__ import annotations
 import gc
 import json
 import os
+import time
 import types
 from typing import Any
 
@@ -174,6 +175,7 @@ class WorldStereo:
                 f"Expected one of {SUPPORTED_MODEL_TYPES}."
             )
 
+        t_start = time.perf_counter()
         transformer = cls._load_transformer(
             cfg,
             model_type,
@@ -183,10 +185,13 @@ class WorldStereo:
             device_mesh=device_mesh,
             device=device,
         )
+        rank0_log(f"[timing] transformer load: {time.perf_counter() - t_start:.1f}s")
 
+        t_aux = time.perf_counter()
         text_encoder, image_clip, vae = cls._load_aux(
             cfg, device=device, device_mesh=device_mesh, fsdp=fsdp, local_files_only=local_files_only
         )
+        rank0_log(f"[timing] text encoder + CLIP + VAE load: {time.perf_counter() - t_aux:.1f}s")
         image_processor = CLIPImageProcessor.from_pretrained(
             cfg.base_model, do_rescale=False, subfolder="image_processor", local_files_only=local_files_only
         )
@@ -205,7 +210,7 @@ class WorldStereo:
             local_files_only=local_files_only,
         )
 
-        rank0_log(f"WorldStereo ({model_type}) ready.")
+        rank0_log(f"WorldStereo ({model_type}) ready. [timing] total model load: {time.perf_counter() - t_start:.1f}s")
         return cls(pipeline=pipeline, cfg=cfg)
 
     # ------------------------------------------------------------------
