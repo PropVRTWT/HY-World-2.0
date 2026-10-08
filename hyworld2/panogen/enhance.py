@@ -54,8 +54,9 @@ def measure_seam_diff(image: Image.Image, sample_step: int = 2) -> tuple[float, 
     return float(diffs.mean()), float(diffs.max())
 
 
-# Measured on PropVR outputs (2026-10): clean seams 2-5 smeared columns,
-# visibly smeared ones 19-24. Seven images -- re-check as more runs come in.
+# Measured on PropVR outputs (2026-10): clean seams 0-3 smeared columns,
+# visibly smeared ones 19-24, a TV screen at the join 0. Eight images --
+# re-check as more runs come in.
 SEAM_SMEAR_THRESHOLD = 10
 
 
@@ -73,8 +74,9 @@ def measure_seam_smear(
     up *more* alike than normal content -- measure_seam_diff() scores such a
     panorama as its best seam (6.8-7.5 measured, vs 14-16 for clean ones).
     This counts columns near either edge whose left-right change is below
-    `ratio` x the image's typical change, inside the horizon `band` (sky and
-    floor are naturally flat and would read as smear).
+    `ratio` x the image's typical change while their top-to-bottom change is
+    above it, inside the horizon `band` (sky and floor are naturally flat and
+    would read as smear).
     """
     arr = np.asarray(image.convert("RGB"), dtype=np.float32)
     h = arr.shape[0]
@@ -83,6 +85,11 @@ def measure_seam_smear(
     margin = max(1, change.shape[0] // 10)
     typical = float(np.median(change[margin:-margin]))
     flat = change < ratio * typical
+    # Smear streaks sideways, so it still varies top to bottom. A genuinely
+    # flat surface at the join (TV screen, plain wall) is flat both ways and
+    # is not smear -- without this, a TV at the join scored 41.
+    vchange = np.abs(np.diff(rows, axis=0)).mean(axis=(0, 2))[:-1]
+    flat &= vchange > ratio * float(np.median(vchange[margin:-margin]))
     return int(flat[:edge_px].sum() + flat[-edge_px:].sum())
 
 
